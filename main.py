@@ -1,7 +1,7 @@
 import asyncio
 import json
 from typing import Dict, List, Optional
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -11,6 +11,8 @@ from langgraph_agent import rag_agent
 from streaming_agent import streaming_agent
 from kpi_monitor import kpi_monitor, calculate_bleu_score
 from thinking_parser import ThinkingParser
+from agent_pipeline import rag_pipeline
+from thinking_callback import thinking_callback_manager, ThinkingIntegration
 
 app = FastAPI(
     title="ゼロコストチャットアプリ",
@@ -20,6 +22,9 @@ app = FastAPI(
 
 # 思考分離パーサーの初期化
 thinking_parser = ThinkingParser()
+
+# 思考コールバックの統合
+thinking_integration = ThinkingIntegration(rag_pipeline, thinking_callback_manager)
 
 # CORS設定
 app.add_middleware(
@@ -143,8 +148,8 @@ async def search_web(query: str, max_results: int = 5) -> List[Dict]:
 
 # REST APIエンドポイント
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
-    """チャットメッセージを処理する REST エンドポイント"""
+async def chat_endpoint(request: ChatRequest, debug: bool = Query(False, description="デバッグ情報を含める")):
+    """チャットメッセージを処理する REST エンドポイント (デバッグ対応)"""
     # KPI測定開始
     start_time = kpi_monitor.start_measurement()
     
@@ -152,44 +157,93 @@ async def chat_endpoint(request: ChatRequest):
         # メッセージを辞書形式に変換
         messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
         
-        # RAGエージェントでメッセージを処理
-        result = await rag_agent.process_message(messages)
-        
-        if not result.get("success", False):
-            # エラーの場合のKPI記録
-            error_msg = result.get("error", "不明なエラー")
+        # デバッグモードの場合は新しいパイプラインを使用
+        if debug:
+            # 高度なRAGパイプラインで思考プロセス付き処理
+            result = await thinking_integration.process_with_thinking(messages)
+            
+            if not result.get("success", False):
+                # エラーの場合のKPI記録
+                error_msg = result.get("error", "不明なエラー")
+                kpi_monitor.record_measurement(
+                    start_time=start_time,
+                    token_count=0,
+                    search_requests=0,
+                    error_occurred=True,
+                    error_message=error_msg
+                )
+                raise HTTPException(status_code=500, detail=error_msg)
+            
+            # 成功の場合のKPI記録
+            response_text = result["response"]
+            token_count = len(response_text.split())  # 簡易的なトークン数
+            search_count = len(result.get("search_results", []))
+            
             kpi_monitor.record_measurement(
                 start_time=start_time,
-                token_count=0,
-                search_requests=0,
-                error_occurred=True,
-                error_message=error_msg
+                token_count=token_count,
+                search_requests=search_count,
+                error_occurred=False
             )
-            raise HTTPException(status_code=500, detail=error_msg)
-        
-        # 成功の場合のKPI記録
-        response_text = result["response"]
-        token_count = len(response_text.split())  # 簡易的なトークン数
-        search_count = len(result.get("search_results", []))
-        
-        kpi_monitor.record_measurement(
-            start_time=start_time,
-            token_count=token_count,
-            search_requests=search_count,
-            error_occurred=False
-        )
-        
-        # 思考分離処理
-        parsed_response = thinking_parser.parse_response(response_text)
-        formatted_response = thinking_parser.format_for_frontend(parsed_response)
-        
-        return {
-            "message": formatted_response["message"],
-            "thinking": formatted_response["thinking"],
-            "has_thinking": formatted_response["has_thinking"],
-            "search_results": result.get("search_results", []),
-            "timestamp": time.time()
-        }
+            
+            # 思考分離処理
+            parsed_response = thinking_parser.parse_response(response_text)
+            formatted_response = thinking_parser.format_for_frontend(parsed_response)
+            
+            return {
+                "message": formatted_response["message"],
+                "thinking": formatted_response["thinking"],
+                "has_thinking": formatted_response["has_thinking"],
+                "search_results": result.get("search_results", []),
+                "timestamp": time.time(),
+                # デバッグ情報を追加
+                "debug": {
+                    "thinking_log": result.get("thinking_log", []),
+                    "thinking_session": result.get("thinking_session", {}),
+                    "intent_analysis": result.get("intent_analysis", {}),
+                    "search_plan": result.get("search_plan", {}),
+                    "pipeline_type": "advanced"
+                }
+            }
+        else:
+            # 通常モードは既存のエージェントを使用
+            result = await rag_agent.process_message(messages)
+            
+            if not result.get("success", False):
+                # エラーの場合のKPI記録
+                error_msg = result.get("error", "不明なエラー")
+                kpi_monitor.record_measurement(
+                    start_time=start_time,
+                    token_count=0,
+                    search_requests=0,
+                    error_occurred=True,
+                    error_message=error_msg
+                )
+                raise HTTPException(status_code=500, detail=error_msg)
+            
+            # 成功の場合のKPI記録
+            response_text = result["response"]
+            token_count = len(response_text.split())  # 簡易的なトークン数
+            search_count = len(result.get("search_results", []))
+            
+            kpi_monitor.record_measurement(
+                start_time=start_time,
+                token_count=token_count,
+                search_requests=search_count,
+                error_occurred=False
+            )
+            
+            # 思考分離処理
+            parsed_response = thinking_parser.parse_response(response_text)
+            formatted_response = thinking_parser.format_for_frontend(parsed_response)
+            
+            return {
+                "message": formatted_response["message"],
+                "thinking": formatted_response["thinking"],
+                "has_thinking": formatted_response["has_thinking"],
+                "search_results": result.get("search_results", []),
+                "timestamp": time.time()
+            }
         
     except Exception as e:
         # 例外発生時のKPI記録

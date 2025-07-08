@@ -1,6 +1,7 @@
 """
 LangGraph + LangChain を使用したRAG処理エージェント
 検索 → RAG → 生成のワークフローを制御
+既存のSimpleRAGAgentと新しいAdvancedRAGPipelineの両方をサポート
 """
 
 import asyncio
@@ -8,6 +9,14 @@ from typing import Dict, List, Any, Optional
 import json
 import httpx
 from ddgs import DDGS
+
+# 新しいパイプラインシステムをインポート
+try:
+    from agent_pipeline import AdvancedRAGPipeline
+    from thinking_callback import ThinkingCallbackManager, ThinkingIntegration
+    ADVANCED_PIPELINE_AVAILABLE = True
+except ImportError:
+    ADVANCED_PIPELINE_AVAILABLE = False
 
 
 class SimpleOllamaLLM:
@@ -75,6 +84,19 @@ class SimpleRAGAgent:
     
     def __init__(self):
         self.llm = SimpleOllamaLLM()
+        
+        # 高度なパイプラインが利用可能な場合は初期化
+        if ADVANCED_PIPELINE_AVAILABLE:
+            self.advanced_pipeline = AdvancedRAGPipeline()
+            self.thinking_callback_manager = ThinkingCallbackManager()
+            self.thinking_integration = ThinkingIntegration(
+                self.advanced_pipeline, 
+                self.thinking_callback_manager
+            )
+        else:
+            self.advanced_pipeline = None
+            self.thinking_callback_manager = None
+            self.thinking_integration = None
     
     async def process_message(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         """メッセージを処理してレスポンスを生成"""
@@ -136,6 +158,35 @@ URL: {result.get('url', 'N/A')}
                 "error": str(e),
                 "response": "申し訳ございません。処理中にエラーが発生しました。"
             }
+    
+    async def process_message_with_thinking(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """高度なパイプラインを使用してメッセージを処理（思考プロセス付き）"""
+        if not ADVANCED_PIPELINE_AVAILABLE or not self.thinking_integration:
+            # 高度なパイプラインが利用できない場合は通常処理にフォールバック
+            result = await self.process_message(messages)
+            result["thinking_mode"] = "fallback"
+            return result
+        
+        try:
+            # 高度なパイプラインで処理
+            result = await self.thinking_integration.process_with_thinking(messages)
+            result["thinking_mode"] = "advanced"
+            return result
+        except Exception as e:
+            # エラーが発生した場合は通常処理にフォールバック
+            result = await self.process_message(messages)
+            result["thinking_mode"] = "fallback_error"
+            result["advanced_error"] = str(e)
+            return result
+    
+    def get_pipeline_info(self) -> Dict[str, Any]:
+        """パイプラインの情報を取得"""
+        return {
+            "simple_pipeline": True,
+            "advanced_pipeline": ADVANCED_PIPELINE_AVAILABLE,
+            "thinking_callback": self.thinking_callback_manager is not None,
+            "thinking_integration": self.thinking_integration is not None
+        }
 
 
 # グローバルエージェントインスタンス
