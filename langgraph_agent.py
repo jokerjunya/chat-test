@@ -1,89 +1,101 @@
 """
 LangGraph + LangChain を使用したRAG処理エージェント
 検索 → RAG → 生成のワークフローを制御
-既存のSimpleRAGAgentと新しいAdvancedRAGPipelineの両方をサポート
+新しいモジュール構造（tools.py, llm.py, shared_state.py）に対応
 """
 
 import asyncio
 from typing import Dict, List, Any, Optional
 import json
-import httpx
-from ddgs import DDGS
 
-# 新しいパイプラインシステムをインポート
+# 新しいモジュール構造からインポート
 try:
+    from tools import web_search_tool, web_search_function  # 新しいツールモジュール
+    from llm import OllamaLLMClient, SimpleLLMClient  # 新しいLLMモジュール  
+    from shared_state import AgentState, create_initial_state  # 新しい共有状態
     from agent_pipeline import AdvancedRAGPipeline
     from thinking_callback import ThinkingCallbackManager, ThinkingIntegration
     ADVANCED_PIPELINE_AVAILABLE = True
-except ImportError:
+    NEW_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"新しいモジュールのインポートエラー: {e}")
+    # フォールバック用の古い実装をインポート
+    from ddgs import DDGS
+    import httpx
     ADVANCED_PIPELINE_AVAILABLE = False
+    NEW_MODULES_AVAILABLE = False
 
 
-class SimpleOllamaLLM:
-    """シンプルなOllama通信クラス"""
-    
-    def __init__(self, model_name: str = "qwen3:30b", base_url: str = "http://localhost:11434"):
-        self.model_name = model_name
-        self.base_url = base_url
-    
-    async def generate_response(self, messages: List[Dict[str, str]]) -> str:
-        """非同期でOllamaからレスポンスを生成"""
+# 後方互換性のため、新しいモジュールが利用できない場合のフォールバック実装
+if not NEW_MODULES_AVAILABLE:
+    class SimpleOllamaLLM:
+        """シンプルなOllama通信クラス（フォールバック）"""
+        
+        def __init__(self, model_name: str = "qwen3:30b", base_url: str = "http://localhost:11434"):
+            self.model_name = model_name
+            self.base_url = base_url
+        
+        async def generate_response(self, messages: List[Dict[str, str]]) -> str:
+            """非同期でOllamaからレスポンスを生成"""
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{self.base_url}/api/chat",
+                        json={
+                            "model": self.model_name,
+                            "messages": messages,
+                            "stream": False
+                        },
+                        timeout=30.0
+                    )
+                    
+                    if response.status_code != 200:
+                        raise Exception(f"Ollama API エラー: {response.status_code}")
+                    
+                    result = response.json()
+                    return result["message"]["content"]
+                    
+            except Exception as e:
+                raise Exception(f"LLM生成エラー: {str(e)}")
+
+    async def web_search_function(query: str, max_results: int = 5) -> List[Dict]:
+        """Web検索関数（フォールバック）"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/api/chat",
-                    json={
-                        "model": self.model_name,
-                        "messages": messages,
-                        "stream": False
-                    },
-                    timeout=30.0
-                )
-                
-                if response.status_code != 200:
-                    raise Exception(f"Ollama API エラー: {response.status_code}")
-                
-                result = response.json()
-                return result["message"]["content"]
-                
-        except Exception as e:
-            raise Exception(f"LLM生成エラー: {str(e)}")
-
-
-async def web_search_function(query: str, max_results: int = 5) -> List[Dict]:
-    """Web検索関数（ツールデコレータを使わない直接実装）"""
-    try:
-        search_query = f"{query} lang:ja"
-        results = []
-        
-        with DDGS() as ddgs:
-            for result in ddgs.text(search_query, max_results=max_results):
-                results.append({
-                    "title": result.get("title", ""),
-                    "url": result.get("href", ""),
-                    "snippet": result.get("body", "")
-                })
-        
-        if not results:
+            search_query = f"{query} lang:ja"
+            results = []
+            
             with DDGS() as ddgs:
-                for result in ddgs.text(query, max_results=max_results):
+                for result in ddgs.text(search_query, max_results=max_results):
                     results.append({
                         "title": result.get("title", ""),
                         "url": result.get("href", ""),
                         "snippet": result.get("body", "")
                     })
-        
-        return results
-        
-    except Exception as e:
-        return [{"title": "検索エラー", "url": "", "snippet": f"検索中にエラーが発生しました: {str(e)}"}]
+            
+            if not results:
+                with DDGS() as ddgs:
+                    for result in ddgs.text(query, max_results=max_results):
+                        results.append({
+                            "title": result.get("title", ""),
+                            "url": result.get("href", ""),
+                            "snippet": result.get("body", "")
+                        })
+            
+            return results
+            
+        except Exception as e:
+            return [{"title": "検索エラー", "url": "", "snippet": f"検索中にエラーが発生しました: {str(e)}"}]
 
 
 class SimpleRAGAgent:
     """シンプルなRAG処理エージェント（LangGraphを使わない直接実装）"""
     
     def __init__(self):
-        self.llm = SimpleOllamaLLM()
+        # 新しいモジュール構造を使用
+        if NEW_MODULES_AVAILABLE:
+            self.llm = SimpleLLMClient()
+        else:
+            self.llm = SimpleOllamaLLM()
         
         # 高度なパイプラインが利用可能な場合は初期化
         if ADVANCED_PIPELINE_AVAILABLE:
@@ -112,7 +124,7 @@ class SimpleRAGAgent:
                     "response": "質問を入力してください。"
                 }
             
-            # Web検索を実行
+            # Web検索を実行（新しいモジュール構造対応）
             search_results = await web_search_function(query)
             
             # 2. コンテキスト化フェーズ
@@ -187,6 +199,18 @@ URL: {result.get('url', 'N/A')}
             "thinking_callback": self.thinking_callback_manager is not None,
             "thinking_integration": self.thinking_integration is not None
         }
+
+
+# 後方互換性のためのエイリアス
+RAGAgent = SimpleRAGAgent
+
+# 新しいモジュール構造で利用可能な場合のみエクスポート
+if NEW_MODULES_AVAILABLE:
+    # web_search_toolは新しいtools.pyからインポート済み
+    pass
+else:
+    # フォールバック用の web_search_tool エイリアス
+    web_search_tool = web_search_function
 
 
 # グローバルエージェントインスタンス

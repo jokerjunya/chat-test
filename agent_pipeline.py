@@ -1,28 +1,41 @@
 """
 LangGraph DAG を使用した段階的思考プロセスの実装
 Intent Analysis → Search Plan → Search → Answer の流れを制御
+新しいモジュール構造（tools.py, llm.py, shared_state.py）に対応
 """
 
 import asyncio
 import json
-from typing import Dict, List, Any, Optional, TypedDict, Annotated
+from typing import Dict, List, Any, Optional, Annotated
 from datetime import datetime
-import httpx
-from ddgs import DDGS
 import time
 from pathlib import Path
 
-
-class AgentState(TypedDict):
-    """エージェントの状態を管理するクラス"""
-    user_query: str
-    messages: List[Dict[str, str]]
-    intent_analysis: Dict[str, Any]
-    search_plan: Dict[str, Any]
-    search_results: List[Dict[str, Any]]
-    final_answer: str
-    thinking_log: List[Dict[str, Any]]
-    error: Optional[str]
+# 新しいモジュール構造からインポート
+try:
+    from tools import web_search_function
+    from llm import OllamaLLMClient
+    from shared_state import AgentState, create_initial_state
+    NEW_MODULES_AVAILABLE = True
+except ImportError:
+    print("新しいモジュールが利用できません。フォールバック実装を使用します。")
+    # フォールバック用の古い実装をインポート
+    import httpx
+    from ddgs import DDGS
+    from typing import TypedDict
+    
+    class AgentState(TypedDict):
+        """エージェントの状態を管理するクラス（フォールバック）"""
+        user_query: str
+        messages: List[Dict[str, str]]
+        intent_analysis: Dict[str, Any]
+        search_plan: Dict[str, Any]
+        search_results: List[Dict[str, Any]]
+        final_answer: str
+        thinking_log: List[Dict[str, Any]]
+        error: Optional[str]
+    
+    NEW_MODULES_AVAILABLE = False
 
 
 class AdvancedRAGPipeline:
@@ -33,8 +46,14 @@ class AdvancedRAGPipeline:
         self.base_url = base_url
         self.thinking_log = []
         
-        # システムプロンプトを読み込み
-        self.system_prompt = self._load_system_prompt()
+        # 新しいモジュール構造を使用
+        if NEW_MODULES_AVAILABLE:
+            self.llm_client = OllamaLLMClient(model_name=model_name, base_url=base_url)
+            self.system_prompt = self.llm_client.get_system_prompt()
+        else:
+            self.llm_client = None
+            # システムプロンプトを読み込み
+            self.system_prompt = self._load_system_prompt()
     
     def _load_system_prompt(self) -> str:
         """システムプロンプトを読み込み"""
@@ -50,6 +69,19 @@ class AdvancedRAGPipeline:
     
     async def _call_llm(self, messages: List[Dict[str, str]]) -> str:
         """LLMを呼び出し"""
+        try:
+            # 新しいモジュール構造を使用
+            if NEW_MODULES_AVAILABLE and self.llm_client:
+                return await self.llm_client.generate_response(messages)
+            else:
+                # フォールバック実装
+                return await self._fallback_call_llm(messages)
+                
+        except Exception as e:
+            raise Exception(f"LLM呼び出しエラー: {str(e)}")
+    
+    async def _fallback_call_llm(self, messages: List[Dict[str, str]]) -> str:
+        """フォールバック用のLLM呼び出し"""
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
@@ -73,6 +105,23 @@ class AdvancedRAGPipeline:
     
     async def _web_search_with_retry(self, query: str, max_results: int = 5, max_retries: int = 3) -> List[Dict]:
         """リトライ機能付きのWeb検索"""
+        try:
+            # 新しいモジュール構造を使用
+            if NEW_MODULES_AVAILABLE:
+                return await web_search_function(query, max_results)
+            else:
+                # フォールバック実装
+                return await self._fallback_web_search(query, max_results, max_retries)
+                
+        except Exception as e:
+            return [{
+                "title": "検索エラー",
+                "url": "",
+                "snippet": f"検索中にエラーが発生しました: {str(e)}"
+            }]
+    
+    async def _fallback_web_search(self, query: str, max_results: int = 5, max_retries: int = 3) -> List[Dict]:
+        """フォールバック用のWeb検索"""
         for attempt in range(max_retries):
             try:
                 # 日本語検索を優先
@@ -387,16 +436,19 @@ URL: {result.get('url', 'N/A')}
             }
         
         # 状態を初期化
-        state: AgentState = {
-            "user_query": user_query,
-            "messages": messages,
-            "intent_analysis": {},
-            "search_plan": {},
-            "search_results": [],
-            "final_answer": "",
-            "thinking_log": [],
-            "error": None
-        }
+        if NEW_MODULES_AVAILABLE:
+            state: AgentState = create_initial_state(user_query, messages)
+        else:
+            state: AgentState = {
+                "user_query": user_query,
+                "messages": messages,
+                "intent_analysis": {},
+                "search_plan": {},
+                "search_results": [],
+                "final_answer": "",
+                "thinking_log": [],
+                "error": None
+            }
         
         try:
             # 段階的処理の実行

@@ -1,14 +1,25 @@
 """
 ストリーミング応答エージェント
 WebSocketでリアルタイムトークンストリーミングを提供
+新しいモジュール構造（tools.py, llm.py）に対応
 """
 
 import asyncio
 import json
-import httpx
 from typing import Dict, List, Any, AsyncGenerator
-from ddgs import DDGS
-from langgraph_agent import web_search_function
+
+# 新しいモジュール構造からインポート
+try:
+    from tools import web_search_function
+    from llm import OllamaLLMClient
+    NEW_MODULES_AVAILABLE = True
+except ImportError:
+    print("新しいモジュールが利用できません。フォールバック実装を使用します。")
+    # フォールバック用の古い実装をインポート
+    import httpx
+    from ddgs import DDGS
+    from langgraph_agent import web_search_function
+    NEW_MODULES_AVAILABLE = False
 
 
 class StreamingAgent:
@@ -17,9 +28,31 @@ class StreamingAgent:
     def __init__(self, model_name: str = "qwen3:30b"):
         self.model_name = model_name
         self.base_url = "http://localhost:11434"
+        
+        # 新しいモジュール構造を使用
+        if NEW_MODULES_AVAILABLE:
+            self.llm_client = OllamaLLMClient(model_name=model_name)
+        else:
+            self.llm_client = None
     
     async def stream_ollama_response(self, messages: List[Dict[str, Any]]) -> AsyncGenerator[str, None]:
         """Ollamaからストリーミング応答を取得"""
+        try:
+            # 新しいモジュール構造を使用
+            if NEW_MODULES_AVAILABLE and self.llm_client:
+                # 新しいLLMクライアントを使用してストリーミング
+                async for token in self.llm_client.stream_response(messages):
+                    yield token
+            else:
+                # フォールバック実装
+                async for token in self._fallback_stream_response(messages):
+                    yield token
+                
+        except Exception as e:
+            yield f"エラー: {str(e)}"
+    
+    async def _fallback_stream_response(self, messages: List[Dict[str, Any]]) -> AsyncGenerator[str, None]:
+        """フォールバック用のストリーミング応答"""
         try:
             # システムプロンプトを追加
             system_prompt = {

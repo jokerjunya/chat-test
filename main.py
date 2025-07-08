@@ -7,12 +7,28 @@ from pydantic import BaseModel
 import uvicorn
 import httpx
 import time
-from langgraph_agent import rag_agent
-from streaming_agent import streaming_agent
-from kpi_monitor import kpi_monitor, calculate_bleu_score
-from thinking_parser import ThinkingParser
-from agent_pipeline import rag_pipeline
-from thinking_callback import thinking_callback_manager, ThinkingIntegration
+
+# 新しいモジュール構造に対応したインポート
+try:
+    from langgraph_agent import rag_agent
+    from streaming_agent import streaming_agent
+    from kpi_monitor import kpi_monitor, calculate_bleu_score
+    from thinking_parser import ThinkingParser
+    from agent_pipeline import rag_pipeline
+    from thinking_callback import thinking_callback_manager, ThinkingIntegration
+    from tools import web_search_function  # 新しいツールモジュール
+    from llm import OllamaLLMClient  # 新しいLLMモジュール
+    NEW_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"新しいモジュールのインポートエラー: {e}")
+    # フォールバック用
+    from langgraph_agent import rag_agent
+    from streaming_agent import streaming_agent
+    from kpi_monitor import kpi_monitor, calculate_bleu_score
+    from thinking_parser import ThinkingParser
+    from agent_pipeline import rag_pipeline
+    from thinking_callback import thinking_callback_manager, ThinkingIntegration
+    NEW_MODULES_AVAILABLE = False
 
 app = FastAPI(
     title="ゼロコストチャットアプリ",
@@ -72,6 +88,21 @@ manager = WebSocketManager()
 async def call_ollama(messages: List[ChatMessage], model: str = "qwen3:30b") -> str:
     """Ollamaを使用してLLMからの応答を取得"""
     try:
+        # 新しいモジュール構造を使用
+        if NEW_MODULES_AVAILABLE:
+            llm_client = OllamaLLMClient(model_name=model)
+            ollama_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
+            return await llm_client.generate_response(ollama_messages)
+        else:
+            # フォールバック実装
+            return await _fallback_call_ollama(messages, model)
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ollama API エラー: {str(e)}")
+
+async def _fallback_call_ollama(messages: List[ChatMessage], model: str = "qwen3:30b") -> str:
+    """フォールバック用のOllama通信"""
+    try:
         # Ollamaのエンドポイントに送信するフォーマット
         ollama_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
         
@@ -108,6 +139,27 @@ async def call_ollama(messages: List[ChatMessage], model: str = "qwen3:30b") -> 
 # DuckDuckGo Web検索機能
 async def search_web(query: str, max_results: int = 5) -> List[Dict]:
     """DuckDuckGo を使用してWeb検索を実行"""
+    try:
+        # 新しいモジュール構造を使用
+        if NEW_MODULES_AVAILABLE:
+            return await web_search_function(query, max_results)
+        else:
+            # フォールバック実装
+            return await _fallback_search_web(query, max_results)
+            
+    except Exception as e:
+        print(f"Web検索エラー: {str(e)}")
+        # エラー時はフォールバック
+        return [
+            {
+                "title": "検索結果を取得できませんでした",
+                "url": "",
+                "snippet": f"検索クエリ: {query} の結果を取得できませんでした。"
+            }
+        ]
+
+async def _fallback_search_web(query: str, max_results: int = 5) -> List[Dict]:
+    """フォールバック用のWeb検索"""
     try:
         from ddgs import DDGS
         

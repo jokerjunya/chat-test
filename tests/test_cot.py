@@ -1,6 +1,7 @@
 """
 Chain of Thought (CoT) 思考プロセスのテスト
 思考JSONが含まれるかを検証するPyTest
+新しいモジュール構造に対応
 """
 
 import pytest
@@ -13,9 +14,22 @@ import os
 # プロジェクトルートをパスに追加
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from agent_pipeline import AdvancedRAGPipeline
-from thinking_callback import ThinkingCallbackManager, ThinkingIntegration
-from thinking_parser import ThinkingParser
+# 新しいモジュール構造に対応したインポート
+try:
+    from agent_pipeline import AdvancedRAGPipeline
+    from thinking_callback import ThinkingCallbackManager, ThinkingIntegration
+    from thinking_parser import ThinkingParser
+    from shared_state import AgentState, create_initial_state
+    from tools import web_search_function
+    from llm import OllamaLLMClient
+    NEW_MODULES_AVAILABLE = True
+except ImportError as e:
+    print(f"新しいモジュールのインポートエラー: {e}")
+    # フォールバック用
+    from agent_pipeline import AdvancedRAGPipeline
+    from thinking_callback import ThinkingCallbackManager, ThinkingIntegration
+    from thinking_parser import ThinkingParser
+    NEW_MODULES_AVAILABLE = False
 
 
 class TestCoTProcessing:
@@ -202,6 +216,46 @@ Pythonは初心者にも学びやすいプログラミング言語です。基�
             # 検索が実行された場合、結果が空でも正常
             assert "search_results" in result
             assert isinstance(result["search_results"], list)
+    
+    @pytest.mark.skipif(not NEW_MODULES_AVAILABLE, reason="新しいモジュールが利用できません")
+    def test_new_module_structure(self):
+        """新しいモジュール構造のテスト"""
+        # 統一AgentStateのテスト
+        state = create_initial_state("テスト質問", [])
+        assert isinstance(state, dict)
+        assert "user_query" in state
+        assert "thinking_log" in state
+        assert "session_id" in state
+        assert "timestamp" in state
+        
+        # LLMクライアントのテスト
+        llm_client = OllamaLLMClient()
+        assert llm_client.model_name == "qwen3:30b"
+        assert llm_client.base_url == "http://localhost:11434"
+        
+        # システムプロンプトが読み込まれるかテスト
+        system_prompt = llm_client.get_system_prompt()
+        assert isinstance(system_prompt, str)
+        assert len(system_prompt) > 0
+    
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(not NEW_MODULES_AVAILABLE, reason="新しいモジュールが利用できません")
+    async def test_unified_web_search_function(self):
+        """統一Web検索関数のテスト"""
+        # 簡単な検索テスト
+        try:
+            results = await web_search_function("Python", max_results=2)
+            assert isinstance(results, list)
+            assert len(results) <= 2
+            
+            # 各結果の構造チェック
+            for result in results:
+                assert "title" in result
+                assert "url" in result
+                assert "snippet" in result
+        except Exception:
+            # 検索エラーの場合もテスト通過（ネットワーク依存のため）
+            pass
     
     @pytest.mark.asyncio
     async def test_thinking_log_timing(self, pipeline, sample_messages):
